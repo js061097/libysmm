@@ -110,6 +110,9 @@ int main(int argc, char *argv[])
         .a = A, .flags = 0
     };
 
+    smm.beta = 0;
+    printf("%f\n",smm.beta);
+
     libysmm_cl_smm_kernel_t smmk;
     err = libysmm_cl_create_smm_kernel(&smmk, h, &smm, sizeof(smm), 0);
     if (err < 0)
@@ -168,6 +171,7 @@ int main(int argc, char *argv[])
     double gbytes = NREPS*4*(M + K)*N / dt / pow(1024, 3);
 
     printf("%f GFLOP/s\n%f GiB/s\n", gflops, gbytes);
+    
 
     clReleaseMemObject(bufB);
     clReleaseMemObject(bufC);
