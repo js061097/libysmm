@@ -27,6 +27,223 @@ const char *kern_tiled =
 #include "kernels/tiled.cl"
 ;
 
+double get_event_exec_time(cl_event event)
+{
+    cl_ulong start_time, end_time;
+    /*Get start device counter for the event*/
+    clGetEventProfilingInfo (event,
+                    CL_PROFILING_COMMAND_START,
+                    sizeof(cl_ulong),
+                    &start_time,
+                    NULL);
+    /*Get end device counter for the event*/
+    clGetEventProfilingInfo (event,
+                    CL_PROFILING_COMMAND_END,
+                    sizeof(cl_ulong),
+                    &end_time,
+                    NULL);
+    /*Convert the counter values to milli seconds*/
+    double total_time = (end_time - start_time) * 1e-6;
+    return total_time;
+}
+int selectKernel(const libysmm_smm_t *smm){
+    
+    cl_platform_id platform;
+    cl_device_id dev;
+    cl_int err;
+    int M=smm->m, N=smm->n,K=smm->k;
+
+    err = clGetPlatformIDs(1, &platform, NULL);
+    if (err < 0)
+    {
+        puts("Couldn't identify a platform\n");
+        exit(1);
+    }
+
+    err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &dev, NULL);
+    if (err < 0)
+    {
+        puts("Couldn't access any devices\n");
+        exit(1);
+    }
+
+    cl_context ctx = clCreateContext(NULL, 1, &dev, NULL, NULL, &err);
+    if (err < 0)
+    {
+        puts("Couldn't create a context\n");
+        exit(1);
+    }
+
+    cl_command_queue queue = clCreateCommandQueue(ctx, dev, 0, &err);
+    if (err < 0)
+    {
+        puts("Couldn't create a queue\n");
+        exit(1);
+    }
+
+    const int trows = 8, tcols = 4;
+    const int tlda = round_up(K, tcols);
+    const int tm = round_up(M, trows);
+    std::vector<float> ta(tlda*tm, 0.0f);
+
+    for (int i = 0; i < M; i++)
+        for (int j = 0; j < K; j++)
+        {
+            int tr = i / trows, trr = i % trows;
+            int tc = j / tcols, tcc = j % tcols;
+            int idx = tr*trows*tlda + tc*trows*tcols + tcc*trows + trr;
+            ta[idx] = smm->alpha*static_cast<float *>(smm->a)[i*smm->lda + j];
+        }
+
+    // Copy A
+    
+    auto a_ = clCreateBuffer(ctx, CL_MEM_COPY_HOST_PTR,
+                              sizeof(float)*ta.size(), ta.data(), &err);
+    if (err < 0)
+        throw err;
+
+
+    float *B = (float*)calloc(K*N, sizeof(float));
+    float *C = (float*)calloc(N*M, sizeof(float));
+    for (int i = 0; i < M*K; i++)
+
+    for (int i = 0; i < K*N; i++)
+    {
+        B[i] = (float) rand() / (float) RAND_MAX;
+    }
+    cl_mem bufB = clCreateBuffer(ctx, CL_MEM_READ_ONLY, K*N*sizeof(*B), NULL, &err);
+    cl_mem bufC = clCreateBuffer(ctx, CL_MEM_READ_WRITE, M*N*sizeof(*C), NULL, &err);
+
+    err = clEnqueueWriteBuffer(queue, bufB, CL_TRUE, 0, K*N*sizeof(*B), B, 0, NULL, NULL);
+    err = clEnqueueWriteBuffer(queue, bufC, CL_TRUE, 0, M*N*sizeof(*C), C, 0, NULL, NULL);
+
+    json tplargs = {
+        {"k_mod_4", K % 4}, {"m_mod_16", M % 16}
+    };
+
+    std::string ksrc = inja::render(kern_tiled, tplargs);
+    const char *ksrcp = ksrc.c_str();
+
+    // Build the program
+    auto prg = clCreateProgramWithSource(ctx, 1, &ksrcp, nullptr, &err);
+    if (err < 0)
+        throw err;
+
+    err = clBuildProgram(prg, 1, &dev, nullptr, nullptr, nullptr);
+    if (err < 0)
+    {
+        clReleaseProgram(prg);
+        throw err;
+    }
+
+    // Create the kernel
+    auto kernel_ = clCreateKernel(prg, "mm", &err);
+
+    // Release the program, irrespective of if we created the kernel or not
+    clReleaseProgram(prg);
+
+    // See if we created the kernel
+    if (err < 0)
+        throw err;
+
+    // Bind the static arguments
+    err = clSetKernelArg(kernel_, 0, sizeof(a_), &a_);
+    if (err < 0)
+        throw err;
+    err = clSetKernelArg(kernel_, 1, sizeof(bufB), &bufB);
+    if (err < 0)
+        throw err;
+    err = clSetKernelArg(kernel_, 2, sizeof(bufC), &bufC);
+    if (err < 0)
+        throw err;
+
+    const int sargs[] = { smm->m, smm->n, smm->k, tlda, smm->ldb, smm->ldc };
+    for (int i = 0; i < 6; i++)
+    {
+        err = clSetKernelArg(kernel_, i + 3, sizeof(int), &sargs[i]);
+        if (err < 0)
+            throw err;
+    }
+
+    int work_dim_ = 2;
+
+    // Columns and rows per OpenCL thread (fixed)
+    const int cpt = 4;
+    const int rpt = 16;
+
+    // Blocking factors (adjustable, factor of 8 hardcoded from sub group size)
+    const int blk_c = 2*8;
+    const int blk_r = 1;
+
+    size_t ls_[2],gs_[2];
+    ls_[0] = blk_c;
+    ls_[1] = blk_r;
+
+    gs_[0] = round_up(N, cpt*blk_c) / cpt;
+    gs_[1] = round_up(M, rpt*blk_r) / rpt;
+
+    cl_event event;
+    err=clEnqueueNDRangeKernel(queue, kernel_,work_dim_, nullptr, gs_, ls_, 0, NULL, &event);
+    clWaitForEvents(1, &event);
+
+    double time_tiled = get_event_exec_time(event);
+
+    //Basic Kernel profiling
+
+    // Render the kernel
+    tplargs = {
+        {"M", smm->m}, {"N", smm->n}, {"K", smm->k}, {"lda", smm->lda}, {"ldb", smm->ldb}, {"ldc", smm->ldc},
+        {"alpha", smm->alpha}, {"beta", smm->beta}, {"TM", 8}
+    };
+
+    ksrc = inja::render(kern_basic, tplargs);
+    ksrcp = ksrc.c_str();
+
+    // Build the program
+    prg = clCreateProgramWithSource(ctx, 1, &ksrcp, nullptr, &err);
+    if (err < 0)
+        throw err;
+
+    err = clBuildProgram(prg, 1, &dev, nullptr, nullptr, nullptr);
+    if (err < 0)
+    {
+        clReleaseProgram(prg);
+        throw err;
+    }
+
+    // Create the kernel
+    kernel_ = clCreateKernel(prg, "mm", &err);
+
+    // Release the program, irrespective of if we created the kernel or not
+    clReleaseProgram(prg);
+
+    // See if we created the kernel
+    if (err < 0)
+        throw err;
+
+    // Bind the argument
+    err = clSetKernelArg(kernel_, 0, sizeof(a_), &a_);
+    if (err < 0)
+        throw err;
+    err = clSetKernelArg(kernel_, 1, sizeof(bufB), &bufB);
+    if (err < 0)
+        throw err;
+    err = clSetKernelArg(kernel_, 2, sizeof(bufC), &bufC);
+    if (err < 0)
+        throw err;
+
+    work_dim_ = 1;
+    ls_[0] = 64;
+    gs_[0] = ((smm->n + ls_[0] - 1) / ls_[0])*ls_[0];
+
+    err=clEnqueueNDRangeKernel(queue, kernel_,work_dim_, nullptr, gs_, ls_, 0, NULL, &event);
+    clWaitForEvents(1, &event);
+
+    double time_basic = get_event_exec_time(event);
+    std::cout<<time_tiled<<" "<<time_basic<<std::endl;
+    return 0;
+}
+
 template<typename T, typename... Ts>
 std::string
 libysmm_query_string(const T& fn, Ts... args)
@@ -260,6 +477,8 @@ libysmm_cl_handle::smm_kernel(
     smmk->smm_ = *smm;
     smmk->smm_.a = nullptr;
 
+    //0 if basic, 1 if tiled
+    int kern_ = selectKernel(smm);
     /*
      * Tile A.  Each tile is 8 by 4 with the tiles being packed next
      * to each other in memory in a row-major order.  The contents of each
@@ -286,6 +505,7 @@ libysmm_cl_handle::smm_kernel(
     if (err < 0)
         throw err;
 
+    
     // Render the kernel
     json tplargs = {
         {"k_mod_4", k % 4}, {"m_mod_16", m % 16}
