@@ -241,7 +241,8 @@ int selectKernel(const libysmm_smm_t *smm){
 
     double time_basic = get_event_exec_time(event);
     std::cout<<time_tiled<<" "<<time_basic<<std::endl;
-    return 0;
+
+    return (time_basic<time_tiled)?0:1;
 }
 
 template<typename T, typename... Ts>
@@ -440,10 +441,7 @@ libysmm_cl_handle::smm_kernel(
     if (m <= 0 || n <= 0 || k <= 0)
         throw CL_INVALID_VALUE;
 
-    // Ensure the dimensions are valid for our tiled kernel
-    if (n % 32)
-        throw CL_INVALID_VALUE;
-
+    
     // Enusre beta is valid
     // TODO: Jason add support for beta = 1
     if (0 != beta)
@@ -477,16 +475,40 @@ libysmm_cl_handle::smm_kernel(
     smmk->smm_ = *smm;
     smmk->smm_.a = nullptr;
 
-    //0 if basic, 1 if tiled
+    json tplargs;
+
+    //Selects which kernel to render based on profiled time: 0 if basic, 1 if tiled
     int kern_ = selectKernel(smm);
+
+    // Render the kernel
+    tplargs = {
+        {"M", m}, {"N", n}, {"K", k}, {"lda", lda}, {"ldb", ldb}, {"ldc", ldc},
+        {"alpha", alpha}, {"beta", beta}, {"TM", 8}
+    };
+    std::string ksrc;
+    const char *ksrcp;
+    cl_int err;
+    if(kern_ == 0){
+        ksrc = inja::render(kern_basic, tplargs);
+        ksrcp = ksrc.c_str();
+
+
+    }
+    const int trows = 8, tcols = 4;
+    const int tm = round_up(m, trows);
+    const int tlda = round_up(k, tcols);
+
+    if(kern_ == 1){
     /*
      * Tile A.  Each tile is 8 by 4 with the tiles being packed next
      * to each other in memory in a row-major order.  The contents of each
      * tile are stored column-major.  Here, we also handle alpha.
      */
-    const int trows = 8, tcols = 4;
-    const int tlda = round_up(k, tcols);
-    const int tm = round_up(m, trows);
+    
+    // Ensure the dimensions are valid for our tiled kernel
+    if (n % 32)
+        throw CL_INVALID_VALUE;
+    
     std::vector<float> ta(tlda*tm, 0.0f);
 
     for (int i = 0; i < m; i++)
@@ -499,7 +521,7 @@ libysmm_cl_handle::smm_kernel(
         }
 
     // Copy A
-    cl_int err;
+    
     smmk->a_ = clCreateBuffer(ctx_, CL_MEM_COPY_HOST_PTR,
                               sizeof(float)*ta.size(), ta.data(), &err);
     if (err < 0)
@@ -507,13 +529,13 @@ libysmm_cl_handle::smm_kernel(
 
     
     // Render the kernel
-    json tplargs = {
+    tplargs = {
         {"k_mod_4", k % 4}, {"m_mod_16", m % 16}
     };
 
-    std::string ksrc = inja::render(kern_tiled, tplargs);
-    const char *ksrcp = ksrc.c_str();
-
+    ksrc = inja::render(kern_tiled, tplargs);
+    ksrcp = ksrc.c_str();
+    }
     // Build the program
     auto prg = clCreateProgramWithSource(ctx_, 1, &ksrcp, nullptr, &err);
     if (err < 0)
@@ -541,6 +563,13 @@ libysmm_cl_handle::smm_kernel(
     if (err < 0)
         throw err;
 
+    if(kern_==0){
+        smmk->work_dim_ = 1;
+        smmk->ls_[0] = 64;
+        smmk->gs_[0] = ((n + smmk->ls_[0] - 1) / smmk->ls_[0])*smmk->ls_[0];
+    }
+    if(kern_==1)
+    {
     const int sargs[] = { m, n, k, tlda, ldb, ldc };
     for (int i = 0; i < 6; i++)
     {
@@ -564,6 +593,7 @@ libysmm_cl_handle::smm_kernel(
 
     smmk->gs_[0] = round_up(n, cpt*blk_c) / cpt;
     smmk->gs_[1] = round_up(m, rpt*blk_r) / rpt;
+    }
 
     return smmk.release();
 }
