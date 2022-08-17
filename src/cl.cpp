@@ -81,6 +81,8 @@ int selectKernel(const libysmm_smm_t *smm){
         exit(1);
     }
 
+    //Tiled kernel profiling
+
     const int trows = 8, tcols = 4;
     const int tlda = round_up(K, tcols);
     const int tm = round_up(M, trows);
