@@ -46,43 +46,42 @@ double get_event_exec_time(cl_event event)
     double total_time = (end_time - start_time) * 1e-6;
     return total_time;
 }
-int selectKernel(const libysmm_smm_t *smm){
+int selectKernel(const libysmm_smm_t *smm, const cl_context ctx_, const cl_device_id dev_id){
     
-    cl_platform_id platform;
-    cl_device_id dev;
     cl_int err;
     int M=smm->m, N=smm->n,K=smm->k;
 
-    err = clGetPlatformIDs(1, &platform, NULL);
-    if (err < 0)
-    {
-        puts("Couldn't identify a platform\n");
-        exit(1);
-    }
-
-    err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &dev, NULL);
-    if (err < 0)
-    {
-        puts("Couldn't access any devices\n");
-        exit(1);
-    }
-
-    cl_context ctx = clCreateContext(NULL, 1, &dev, NULL, NULL, &err);
-    if (err < 0)
-    {
-        puts("Couldn't create a context\n");
-        exit(1);
-    }
-
-    cl_command_queue queue = clCreateCommandQueue(ctx, dev, 0, &err);
+    //Creating queue
+    cl_command_queue queue = clCreateCommandQueue(ctx_, dev_id, 0, &err);
     if (err < 0)
     {
         puts("Couldn't create a queue\n");
         exit(1);
     }
 
-    //Tiled kernel profiling
+    //Create and Init B and C
+    float *B = (float*)calloc(K*N, sizeof(float));
+    float *C = (float*)calloc(N*M, sizeof(float));
 
+    for (int i = 0; i < K*N; i++)
+    {
+        B[i] = (float) rand() / (float) RAND_MAX;
+    }
+    
+    for (int i = 0; i < M; i++)
+    {
+        for (int j = 0; j < N; j++)
+        {
+            C[i*N + j] = 0;
+        }
+    }
+    cl_mem bufB = clCreateBuffer(ctx_, CL_MEM_READ_ONLY, K*N*sizeof(*B), NULL, &err);
+    cl_mem bufC = clCreateBuffer(ctx_, CL_MEM_READ_WRITE, M*N*sizeof(*C), NULL, &err);
+
+    err = clEnqueueWriteBuffer(queue, bufB, CL_TRUE, 0, K*N*sizeof(*B), B, 0, NULL, NULL);
+    err = clEnqueueWriteBuffer(queue, bufC, CL_TRUE, 0, M*N*sizeof(*C), C, 0, NULL, NULL);
+
+    //1. Tiled kernel profiling
     const int trows = 8, tcols = 4;
     const int tlda = round_up(K, tcols);
     const int tm = round_up(M, trows);
@@ -96,28 +95,12 @@ int selectKernel(const libysmm_smm_t *smm){
             int idx = tr*trows*tlda + tc*trows*tcols + tcc*trows + trr;
             ta[idx] = smm->alpha*static_cast<float *>(smm->a)[i*smm->lda + j];
         }
-
+        
     // Copy A
-    
-    auto a_ = clCreateBuffer(ctx, CL_MEM_COPY_HOST_PTR,
+    auto a_ = clCreateBuffer(ctx_, CL_MEM_COPY_HOST_PTR,
                               sizeof(float)*ta.size(), ta.data(), &err);
     if (err < 0)
         throw err;
-
-
-    float *B = (float*)calloc(K*N, sizeof(float));
-    float *C = (float*)calloc(N*M, sizeof(float));
-    for (int i = 0; i < M*K; i++)
-
-    for (int i = 0; i < K*N; i++)
-    {
-        B[i] = (float) rand() / (float) RAND_MAX;
-    }
-    cl_mem bufB = clCreateBuffer(ctx, CL_MEM_READ_ONLY, K*N*sizeof(*B), NULL, &err);
-    cl_mem bufC = clCreateBuffer(ctx, CL_MEM_READ_WRITE, M*N*sizeof(*C), NULL, &err);
-
-    err = clEnqueueWriteBuffer(queue, bufB, CL_TRUE, 0, K*N*sizeof(*B), B, 0, NULL, NULL);
-    err = clEnqueueWriteBuffer(queue, bufC, CL_TRUE, 0, M*N*sizeof(*C), C, 0, NULL, NULL);
 
     json tplargs = {
         {"k_mod_4", K % 4}, {"m_mod_16", M % 16}
@@ -127,11 +110,11 @@ int selectKernel(const libysmm_smm_t *smm){
     const char *ksrcp = ksrc.c_str();
 
     // Build the program
-    auto prg = clCreateProgramWithSource(ctx, 1, &ksrcp, nullptr, &err);
+    auto prg = clCreateProgramWithSource(ctx_, 1, &ksrcp, nullptr, &err);
     if (err < 0)
         throw err;
 
-    err = clBuildProgram(prg, 1, &dev, nullptr, nullptr, nullptr);
+    err = clBuildProgram(prg, 1, &dev_id, nullptr, nullptr, nullptr);
     if (err < 0)
     {
         clReleaseProgram(prg);
@@ -177,20 +160,26 @@ int selectKernel(const libysmm_smm_t *smm){
     const int blk_c = 2*8;
     const int blk_r = 1;
 
-    size_t ls_[2],gs_[2];
+    size_t ls_[3],gs_[3];
     ls_[0] = blk_c;
     ls_[1] = blk_r;
 
     gs_[0] = round_up(N, cpt*blk_c) / cpt;
     gs_[1] = round_up(M, rpt*blk_r) / rpt;
 
-    cl_event event;
-    err=clEnqueueNDRangeKernel(queue, kernel_,work_dim_, nullptr, gs_, ls_, 0, NULL, &event);
-    clWaitForEvents(1, &event);
+    cl_event event_1;
+    err=clEnqueueNDRangeKernel(queue, kernel_,work_dim_, nullptr, gs_, ls_, 0, NULL, &event_1);
+    clWaitForEvents(1, &event_1);
 
-    double time_tiled = get_event_exec_time(event);
+    double time_tiled = get_event_exec_time(event_1);
 
-    //Basic Kernel profiling
+    //2. Basic Kernel profiling
+
+    // Copy A
+    a_ = clCreateBuffer(ctx_, CL_MEM_COPY_HOST_PTR,
+                              sizeof(float)*M*smm->lda, smm->a, &err);
+    if (err < 0)
+        throw err;
 
     // Render the kernel
     tplargs = {
@@ -202,11 +191,11 @@ int selectKernel(const libysmm_smm_t *smm){
     ksrcp = ksrc.c_str();
 
     // Build the program
-    prg = clCreateProgramWithSource(ctx, 1, &ksrcp, nullptr, &err);
+    prg = clCreateProgramWithSource(ctx_, 1, &ksrcp, nullptr, &err);
     if (err < 0)
         throw err;
 
-    err = clBuildProgram(prg, 1, &dev, nullptr, nullptr, nullptr);
+    err = clBuildProgram(prg, 1, &dev_id, nullptr, nullptr, nullptr);
     if (err < 0)
     {
         clReleaseProgram(prg);
@@ -223,7 +212,7 @@ int selectKernel(const libysmm_smm_t *smm){
     if (err < 0)
         throw err;
 
-    // Bind the argument
+    //Setting Kernel arguments
     err = clSetKernelArg(kernel_, 0, sizeof(a_), &a_);
     if (err < 0)
         throw err;
@@ -238,13 +227,21 @@ int selectKernel(const libysmm_smm_t *smm){
     ls_[0] = 64;
     gs_[0] = ((smm->n + ls_[0] - 1) / ls_[0])*ls_[0];
 
-    err=clEnqueueNDRangeKernel(queue, kernel_,work_dim_, nullptr, gs_, ls_, 0, NULL, &event);
-    clWaitForEvents(1, &event);
+    cl_event event_2;
+    err=clEnqueueNDRangeKernel(queue, kernel_,work_dim_, nullptr, gs_, ls_, 0, NULL, &event_2);
+    clWaitForEvents(1, &event_2);
 
-    double time_basic = get_event_exec_time(event);
+    double time_basic = get_event_exec_time(event_2);
     std::cout<<time_tiled<<" "<<time_basic<<std::endl;
 
+    clReleaseMemObject(bufB);
+    clReleaseMemObject(bufC);
+    clReleaseMemObject(a_);
+    free(B);
+    free(C);
     return (time_basic<time_tiled)?0:1;
+
+
 }
 
 template<typename T, typename... Ts>
@@ -480,7 +477,7 @@ libysmm_cl_handle::smm_kernel(
     json tplargs;
 
     //Selects which kernel to render based on profiled time: 0 if basic, 1 if tiled
-    int kern_ = selectKernel(smm);
+    int kern_ = selectKernel(smm,ctx_,dev_props_.dev_id); //ctx_ //&dev_props_.dev_id
 
     // Render the kernel
     tplargs = {
@@ -523,7 +520,7 @@ libysmm_cl_handle::smm_kernel(
         }
 
     // Copy A
-    
+
     smmk->a_ = clCreateBuffer(ctx_, CL_MEM_COPY_HOST_PTR,
                               sizeof(float)*ta.size(), ta.data(), &err);
     if (err < 0)
