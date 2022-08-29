@@ -30,19 +30,19 @@ const char *kern_tiled =
 double get_event_exec_time(cl_event event)
 {
     cl_ulong start_time, end_time;
-    /*Get start device counter for the event*/
+    //Get start device counter for the event*/
     clGetEventProfilingInfo (event,
                     CL_PROFILING_COMMAND_START,
                     sizeof(cl_ulong),
                     &start_time,
                     NULL);
-    /*Get end device counter for the event*/
+    //Get end device counter for the event*/
     clGetEventProfilingInfo (event,
                     CL_PROFILING_COMMAND_END,
                     sizeof(cl_ulong),
                     &end_time,
                     NULL);
-    /*Convert the counter values to milli seconds*/
+    //Convert the counter values to milli seconds
     double total_time = (end_time - start_time) * 1e-6;
     return total_time;
 }
@@ -60,6 +60,8 @@ int selectKernel(const libysmm_smm_t *smm, const cl_context ctx_, const cl_devic
     }
 
     //Create and Init B and C
+    //auto B = std::make_unique<float[]>(K*N);
+    //auto C = std::make_unique<float[]>(N*M);
     float *B = (float*)calloc(K*N, sizeof(float));
     float *C = (float*)calloc(N*M, sizeof(float));
 
@@ -99,8 +101,11 @@ int selectKernel(const libysmm_smm_t *smm, const cl_context ctx_, const cl_devic
     // Copy A
     auto a_ = clCreateBuffer(ctx_, CL_MEM_COPY_HOST_PTR,
                               sizeof(float)*ta.size(), ta.data(), &err);
-    if (err < 0)
-        throw err;
+    if (err < 0){
+        clReleaseMemObject(bufB);clReleaseMemObject(bufC);clReleaseMemObject(a_);free(B);free(C);
+        throw err;    
+    }
+        
 
     json tplargs = {
         {"k_mod_4", K % 4}, {"m_mod_16", M % 16}
@@ -112,12 +117,15 @@ int selectKernel(const libysmm_smm_t *smm, const cl_context ctx_, const cl_devic
     // Build the program
     auto prg = clCreateProgramWithSource(ctx_, 1, &ksrcp, nullptr, &err);
     if (err < 0)
-        throw err;
+    {
+        clReleaseMemObject(bufB);clReleaseMemObject(bufC);clReleaseMemObject(a_);free(B);free(C);
+        throw err;}
 
     err = clBuildProgram(prg, 1, &dev_id, nullptr, nullptr, nullptr);
     if (err < 0)
     {
         clReleaseProgram(prg);
+        clReleaseMemObject(bufB);clReleaseMemObject(bufC);clReleaseMemObject(a_);free(B);free(C);
         throw err;
     }
 
@@ -129,25 +137,38 @@ int selectKernel(const libysmm_smm_t *smm, const cl_context ctx_, const cl_devic
 
     // See if we created the kernel
     if (err < 0)
+    {
+        clReleaseMemObject(bufB);clReleaseMemObject(bufC);clReleaseMemObject(a_);free(B);free(C);
         throw err;
+    }
 
     // Bind the static arguments
     err = clSetKernelArg(kernel_, 0, sizeof(a_), &a_);
     if (err < 0)
-        throw err;
+        {clReleaseMemObject(bufB);clReleaseMemObject(bufC);clReleaseMemObject(a_);free(B);free(C);
+         throw err;}
     err = clSetKernelArg(kernel_, 1, sizeof(bufB), &bufB);
     if (err < 0)
-        throw err;
+        {
+            clReleaseMemObject(bufB);clReleaseMemObject(bufC);clReleaseMemObject(a_);free(B);free(C);
+            throw err;
+        }
     err = clSetKernelArg(kernel_, 2, sizeof(bufC), &bufC);
     if (err < 0)
-        throw err;
+        {
+            clReleaseMemObject(bufB);clReleaseMemObject(bufC);clReleaseMemObject(a_);free(B);free(C);
+            throw err;
+        }
 
     const int sargs[] = { smm->m, smm->n, smm->k, tlda, smm->ldb, smm->ldc };
     for (int i = 0; i < 6; i++)
     {
         err = clSetKernelArg(kernel_, i + 3, sizeof(int), &sargs[i]);
         if (err < 0)
+        {
+            clReleaseMemObject(bufB);clReleaseMemObject(bufC);clReleaseMemObject(a_);free(B);free(C);
             throw err;
+        }
     }
 
     int work_dim_ = 2;
@@ -179,7 +200,9 @@ int selectKernel(const libysmm_smm_t *smm, const cl_context ctx_, const cl_devic
     a_ = clCreateBuffer(ctx_, CL_MEM_COPY_HOST_PTR,
                               sizeof(float)*M*smm->lda, smm->a, &err);
     if (err < 0)
-        throw err;
+        {   clReleaseMemObject(bufB);clReleaseMemObject(bufC);clReleaseMemObject(a_);free(B);free(C);
+            throw err;
+        }
 
     // Render the kernel
     tplargs = {
@@ -193,12 +216,17 @@ int selectKernel(const libysmm_smm_t *smm, const cl_context ctx_, const cl_devic
     // Build the program
     prg = clCreateProgramWithSource(ctx_, 1, &ksrcp, nullptr, &err);
     if (err < 0)
+    {
+        clReleaseMemObject(bufB);clReleaseMemObject(bufC);clReleaseMemObject(a_);free(B);free(C);
         throw err;
+    }
+        
 
     err = clBuildProgram(prg, 1, &dev_id, nullptr, nullptr, nullptr);
     if (err < 0)
     {
         clReleaseProgram(prg);
+        clReleaseMemObject(bufB);clReleaseMemObject(bufC);clReleaseMemObject(a_);free(B);free(C);
         throw err;
     }
 
@@ -210,18 +238,30 @@ int selectKernel(const libysmm_smm_t *smm, const cl_context ctx_, const cl_devic
 
     // See if we created the kernel
     if (err < 0)
+     {
+        clReleaseMemObject(bufB);clReleaseMemObject(bufC);clReleaseMemObject(a_);free(B);free(C);
         throw err;
+     }   
 
     //Setting Kernel arguments
     err = clSetKernelArg(kernel_, 0, sizeof(a_), &a_);
     if (err < 0)
-        throw err;
+        {   clReleaseMemObject(bufB);clReleaseMemObject(bufC);clReleaseMemObject(a_);free(B);free(C);
+            throw err;
+        }
     err = clSetKernelArg(kernel_, 1, sizeof(bufB), &bufB);
     if (err < 0)
+    {
+        clReleaseMemObject(bufB);clReleaseMemObject(bufC);clReleaseMemObject(a_);free(B);free(C);
         throw err;
+    }
+        
     err = clSetKernelArg(kernel_, 2, sizeof(bufC), &bufC);
     if (err < 0)
+    {
+        clReleaseMemObject(bufB);clReleaseMemObject(bufC);clReleaseMemObject(a_);free(B);free(C);
         throw err;
+    }
 
     work_dim_ = 1;
     ls_[0] = 64;
@@ -478,7 +518,7 @@ libysmm_cl_handle::smm_kernel(
 
     //Selects which kernel to render based on profiled time: 0 if basic, 1 if tiled
     int kern_ = selectKernel(smm,ctx_,dev_props_.dev_id); //ctx_ //&dev_props_.dev_id
-
+    kern_ = 1;
     // Render the kernel
     tplargs = {
         {"M", m}, {"N", n}, {"K", k}, {"lda", lda}, {"ldb", ldb}, {"ldc", ldc},
