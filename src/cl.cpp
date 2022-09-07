@@ -43,7 +43,7 @@ double get_event_exec_time(cl_event event)
                     &end_time,
                     NULL);
     //Convert the counter values to milli seconds
-    double total_time = (end_time - start_time) * 1e-6;
+    double total_time = (end_time - start_time)/1000000000;
     return total_time;
 }
 int selectKernel(const libysmm_smm_t *smm, const cl_context ctx_, const cl_device_id dev_id){
@@ -272,15 +272,20 @@ int selectKernel(const libysmm_smm_t *smm, const cl_context ctx_, const cl_devic
     clWaitForEvents(1, &event_2);
 
     double time_basic = get_event_exec_time(event_2);
-    std::cout<<time_tiled<<" "<<time_basic<<std::endl;
+
+    //std::cout<<time_basic<<std::endl;
+    double operations = 2*M*N*K;
+    double gflops_basic = operations / time_basic;
+    double gflops_tiled = operations / time_tiled;
+
+    //std::cout<<gflops_tiled<<" "<<gflops_basic<<std::endl;
 
     clReleaseMemObject(bufB);
     clReleaseMemObject(bufC);
     clReleaseMemObject(a_);
     free(B);
     free(C);
-    return (time_basic<time_tiled)?0:1;
-
+    return (gflops_basic<gflops_tiled)?0:1;
 
 }
 
