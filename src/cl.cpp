@@ -285,6 +285,12 @@ int selectKernel(const libysmm_smm_t *smm, const cl_context ctx_, const cl_devic
     clReleaseMemObject(a_);
     free(B);
     free(C);
+    
+    //Displays the kernel chosen
+    if(gflops_basic<gflops_tiled)
+        std::cout<<"Tiled"<<std::endl;
+    else
+        std::cout<<"Basic"<<std::endl;
     return (gflops_basic<gflops_tiled)?0:1;
 
 }
